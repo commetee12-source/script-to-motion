@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 export const SKILL_ENV = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '.env');   // fileURLToPath: spaces, Hangul
 export const FISH_KEY_NAMES = ['FISH_API_KEY', 'FISH_AUDIO_API_KEY'];
+export const ELEVEN_KEY_NAMES = ['ELEVENLABS_API_KEY', 'XI_API_KEY'];
+/** every TTS key name tts.mjs may read — check.mjs makes sure none of them leaks into a project file */
+export const TTS_KEY_NAMES = [...FISH_KEY_NAMES, ...ELEVEN_KEY_NAMES];
 
 /** the value of the first of `names` set in a .env file (NAME=value, optionally quoted or after `export`), or null */
 export function fromEnvFile(f, names) {

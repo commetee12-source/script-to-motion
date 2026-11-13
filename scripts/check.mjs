@@ -16,7 +16,7 @@ import { auditFonts, allowedFonts, stackProblems, genericOnlyStacks, genericFirs
 import { auditGlyphs } from './lib/glyphs.mjs';
 import { auditVendor, loadVendorCatalog } from './lib/vendorfetch.mjs';
 import { readRecord } from './lib/generated.mjs';
-import { allSettings, FISH_KEY_NAMES } from './lib/env.mjs';
+import { allSettings, TTS_KEY_NAMES } from './lib/env.mjs';
 import { scriptSignature } from './lib/scriptsig.mjs';
 import { phraseTimes } from './lib/phrases.mjs';
 
@@ -316,7 +316,7 @@ for (const m of html.matchAll(/<(script|link|img|source|video|audio|iframe|image
   for (const f of allowedFonts(dir).fonts) for (const x of f.files || []) pinnedFont.set(posixRel(x.dest), x.sha256);
   for (const lib of loadVendorCatalog().libs) for (const x of lib.files) pinnedVendor.set(posixRel(x.dest), x.sha256);
   // the user's API key, as tts.mjs finds it
-  const keys = allSettings(dir, FISH_KEY_NAMES).map((k) => ({ ...k, buf: Buffer.from(k.value) }));
+  const keys = allSettings(dir, TTS_KEY_NAMES).map((k) => ({ ...k, buf: Buffer.from(k.value) }));
   const keep = Math.max(1, ...keys.map((k) => k.buf.length)) - 1;
   const hasKey = new Map();   // file → where its key came from
   const CHUNK = 1 << 24, piece = Buffer.allocUnsafe(CHUNK);

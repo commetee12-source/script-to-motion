@@ -46,6 +46,11 @@
  * audio, each cue timed by its estimated reading time (the cues still drive the scenes).
  * Real narration needs BOTH, provided by the user — nothing is guessed or defaulted:
  *   voice  the user's Fish Audio voice model id: "voice" in script.json, else FISH_VOICE (environment or .env)
+ *
+ * "provider": "elevenlabs" in script.json records with ElevenLabs instead: ELEVENLABS_API_KEY (or XI_API_KEY) and
+ * ELEVENLABS_VOICE (or script.json "voice"), model eleven_multilingual_v2 unless "model" names an eleven_* model,
+ * "elevenlabs": { stability, similarity_boost, style } for the voice settings (speed is always 1). Audio comes as MP3 and
+ * is decoded by ffmpeg to the same 44.1 kHz PCM takes.
  *   key    FISH_API_KEY (or FISH_AUDIO_API_KEY) from the environment, else from a `.env` file in the
  *          project folder or any parent folder, else from the skill's own `.env` (git-ignored, where the user keeps
  *          their keys). The key is never copied into the project.
@@ -63,9 +68,12 @@ import { recordGenerated, readRecord, projectOf } from './lib/generated.mjs';
 import { SKILL_ENV, fromEnvFile } from './lib/env.mjs';
 
 const API = 'https://api.fish.audio/v1/tts';
+const ELEVEN_API = 'https://api.elevenlabs.io/v1/text-to-speech/';
+const ELEVEN_DEFAULT_MODEL = 'eleven_multilingual_v2';
 const SR = 44100;
 const DEFAULTS = {
-  voice: '',            // the user's own Fish Audio voice model id — script.json "voice" or FISH_VOICE; never a default
+  provider: 'fish',     // 'fish' (Fish Audio, default) or 'elevenlabs' — script.json "provider"
+  voice: '',            // the user's own voice id — script.json "voice", else FISH_VOICE / ELEVENLABS_VOICE; never a default
   model: 'drama-3',     // the user's model; a missing/misspelt model header silently falls back to s2.1-pro
   temperature: 0.7,
   top_p: 0.7,
@@ -105,6 +113,15 @@ const cfg = { ...DEFAULTS };
 for (const k of Object.keys(DEFAULTS)) if (script[k] != null) cfg[k] = script[k];
 const cues = script.cues || [];
 if (!cues.length) die('script.json has no cues');
+if (!['fish', 'elevenlabs'].includes(cfg.provider)) die(`"provider" must be "fish" or "elevenlabs" (got ${JSON.stringify(cfg.provider)})`);
+const ELEVEN = cfg.provider === 'elevenlabs';
+const PROVIDER = ELEVEN ? 'ElevenLabs' : 'Fish Audio';
+// ElevenLabs: a Fish model name (drama-3, the template default) means "not chosen" → the multilingual model
+if (ELEVEN && !/^eleven_/.test(String(cfg.model))) cfg.model = ELEVEN_DEFAULT_MODEL;
+// ElevenLabs voice settings (script.json "elevenlabs": { stability, similarity_boost, style }); speed is always 1
+const elevenSettings = { stability: 0.5, similarity_boost: 0.75, style: 0, ...(script.elevenlabs || {}) };
+if (elevenSettings.speed != null && elevenSettings.speed !== 1) die('"elevenlabs".speed must stay 1 — the voice is never slowed down or sped up');
+delete elevenSettings.speed;
 
 const seen = new Set();
 for (const [i, c] of cues.entries()) {
@@ -137,15 +154,18 @@ function findSetting(names) {
   return v;
 }
 const silent = script.narration === false;   // a video without narration, by choice
-const apiKey = findSetting(['FISH_API_KEY', 'FISH_AUDIO_API_KEY']);
-if (cfg.voice) FOUND.FISH_VOICE = 'script.json "voice"';
-else cfg.voice = findSetting(['FISH_VOICE']) || '';
+const KEY_NAMES = ELEVEN ? ['ELEVENLABS_API_KEY', 'XI_API_KEY'] : ['FISH_API_KEY', 'FISH_AUDIO_API_KEY'];
+const VOICE_NAME = ELEVEN ? 'ELEVENLABS_VOICE' : 'FISH_VOICE';
+const apiKey = findSetting(KEY_NAMES);
+FOUND.KEY = FOUND[KEY_NAMES[0]];
+if (cfg.voice) FOUND.VOICE = 'script.json "voice"';
+else { cfg.voice = findSetting([VOICE_NAME]) || ''; FOUND.VOICE = FOUND[VOICE_NAME]; }
 // real narration only with the user's own voice id AND key — never guess, borrow or default a voice
-const missing = [!cfg.voice && `the user's Fish Audio voice model id ("voice" in script.json, or FISH_VOICE=<id> in the skill's own .env: ${SKILL_ENV})`,
-  !apiKey && `the user's Fish Audio API key (FISH_API_KEY=<key> in the skill's own .env: ${SKILL_ENV} — git-ignored, where the user's keys live; also read from the environment or a .env in the project or a parent folder)`].filter(Boolean);
+const missing = [!cfg.voice && `the user's ${PROVIDER} voice id ("voice" in script.json, or ${VOICE_NAME}=<id> in the skill's own .env: ${SKILL_ENV})`,
+  !apiKey && `the user's ${PROVIDER} API key (${KEY_NAMES[0]}=<key> in the skill's own .env: ${SKILL_ENV} — git-ignored, where the user's keys live; also read from the environment or a .env in the project or a parent folder)`].filter(Boolean);
 if (missing.length && !opt.placeholder && !silent) {
   die(
-    `Narration is made only with the user's own Fish Audio voice and key. Missing:\n  - ${missing.join('\n  - ')}\n` +
+    `Narration is made only with the user's own ${PROVIDER} voice and key. Missing:\n  - ${missing.join('\n  - ')}\n` +
       '  The user didn\'t give them: make the video without narration ("narration": false in script.json), or, if they\n' +
       '  asked for a voiced video, ask for both and meanwhile build with --placeholder (temporary).',
     2,
@@ -235,6 +255,8 @@ function cacheKey(c, v = 2) {
     temperature: cfg.temperature,
     top_p: cfg.top_p,
     sr: SR,
+    // only for ElevenLabs, so every Fish take cached before providers existed keeps its key
+    ...(ELEVEN ? { provider: 'elevenlabs', settings: elevenSettings } : {}),
   };
   return crypto.createHash('sha256').update(JSON.stringify(p)).digest('hex').slice(0, 24);
 }
@@ -243,7 +265,58 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // the video project whose generated.json records what this run writes (dub/<lang> is part of the project above it)
 const projectRoot = () => projectOf(dir) || dir;
 
+/** Fish-style pause tags → SSML breaks for ElevenLabs' v2/turbo/flash models; other [tags] are dropped there.
+ *  eleven_v3 reads [tags] as its own audio tags, so its text goes as written. */
+function elevenText(say) {
+  if (/^eleven_v3/.test(cfg.model)) return say;
+  return say
+    .replace(/\[long-break\]/gi, '<break time="0.9s" />')
+    .replace(/\[break\]/gi, '<break time="0.35s" />')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/** ElevenLabs returns MP3 (mp3_44100_128 works on every plan); ffmpeg decodes it to 44.1 kHz mono 16-bit PCM. */
+function decodeMp3(buf) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', 'pipe:0', '-f', 's16le', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', String(SR), 'pipe:1'],
+    { input: buf, maxBuffer: 1 << 29 });
+  if (r.error) throw new Error(`ffmpeg is needed to decode ElevenLabs audio: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`ffmpeg could not decode the ElevenLabs audio: ${String(r.stderr).slice(0, 300)}`);
+  return toSamples(r.stdout);
+}
+
+async function synthesizeEleven(c) {
+  const url = `${ELEVEN_API}${encodeURIComponent(cfg.voice)}?output_format=mp3_44100_128`;
+  const body = { text: elevenText(c.say), model_id: cfg.model, voice_settings: { ...elevenSettings, speed: 1 } };
+  for (let attempt = 1; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(180_000),
+      });
+    } catch (err) {
+      if (attempt >= 4) throw new Error(`network error: ${err.message}`);
+      await sleep(2000 * 2 ** (attempt - 1));
+      continue;
+    }
+    if (res.ok) return decodeMp3(Buffer.from(await res.arrayBuffer()));
+    const detail = (await res.text().catch(() => '')).slice(0, 300);
+    if (res.status === 401) throw new Error(`401 unauthorized — ELEVENLABS_API_KEY is invalid or lacks text-to-speech permission ${detail}`);
+    if (res.status === 402) throw new Error('402 payment required — the ElevenLabs account is out of credit');
+    if (res.status === 404) throw new Error(`404 — no ElevenLabs voice with id ${cfg.voice} on this account ${detail}`);
+    if ([429, 500, 502, 503, 504].includes(res.status) && attempt < 4) {
+      await sleep(2000 * 2 ** (attempt - 1));
+      continue;
+    }
+    throw new Error(`HTTP ${res.status} ${detail}`);
+  }
+}
+
 async function synthesize(c) {
+  if (ELEVEN) return synthesizeEleven(c);
   const body = {
     text: c.say,
     reference_id: cfg.voice,
@@ -313,7 +386,7 @@ async function takeFor(c) {
     return { samples: new Int16Array(Math.round(estimateSeconds(c.say) * SR)), placeholder: true, key };
   }
   const samples = await synthesize(c);   // kept exactly as received: what (if anything) comes out is the agent's call
-  if (!samples.length) throw new Error(`cue ${c.id}: Fish Audio returned no audio`);
+  if (!samples.length) throw new Error(`cue ${c.id}: ${PROVIDER} returned no audio`);
   fs.writeFileSync(file, Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength));
   freshFiles.push(file);
   fresh++;
@@ -471,7 +544,7 @@ const duration = r3(audioDuration + cfg.tail);
     if (lost.length) {
       die(`${lost.length} recorded cue(s) would turn into silent placeholders: ${lost.slice(0, 8).join(', ')}${lost.length > 8 ? ' …' : ''}. ` +
         `js/cues.js names their takes and the takes are in .tts-cache, but this run's settings give them other cache keys — the voice id, ` +
-        `model, temperature or top_p differ from what they were recorded with (voice ${cfg.voice ? `from ${FOUND.FISH_VOICE}` : 'not found'}). ` +
+        `model, temperature or top_p differ from what they were recorded with (voice ${cfg.voice ? `from ${FOUND.VOICE}` : 'not found'}). ` +
         'Nothing was written. Run with the settings they were recorded with; if the change is meant, record them anew (--approved --force) or pass --drop-takes.');
     }
   }
@@ -539,10 +612,10 @@ console.log(
 );
 if (unrecorded.length) console.log(`⚠ ${unrecorded.length} cached take(s) this script uses have no record in generated.json (cached before the tools kept it) — check.mjs refuses them. Ask the user; with their OK run once: node tts.mjs ${opt._[0] || '.'} --record-cache`);
 if (cutsApplied.length) console.log(`✂ cuts (script.json "cut") applied: ${cutsApplied.join(', ')}`);
-if (unreviewed.length) console.log(`👂 ${unreviewed.length} take(s) not read yet (${unreviewed.join(', ')}): kept exactly as recorded, with whatever Fish Audio put before, between and after the words. Where the silence is, and what comes out, is yours to decide — read them: node wave.mjs ${opt._[0] || '.'} --unreviewed, then set each cue's "cut" in script.json ("ranges": [] when nothing goes) and run tts.mjs again (references/sound.md §1). check.mjs refuses the hand-off until every take has its cut.`);
-if (silent) console.log('· no narration ("narration": false): silent audio, each cue timed by its estimated reading time. To voice it later: the user gives their Fish Audio voice id + API key, set "narration": true, run tts.mjs again — the scenes follow the new timings.');
+if (unreviewed.length) console.log(`👂 ${unreviewed.length} take(s) not read yet (${unreviewed.join(', ')}): kept exactly as recorded, with whatever ${PROVIDER} put before, between and after the words. Where the silence is, and what comes out, is yours to decide — read them: node wave.mjs ${opt._[0] || '.'} --unreviewed, then set each cue's "cut" in script.json ("ranges": [] when nothing goes) and run tts.mjs again (references/sound.md §1). check.mjs refuses the hand-off until every take has its cut.`);
+if (silent) console.log(`· no narration ("narration": false): silent audio, each cue timed by its estimated reading time. To voice it later: the user gives their ${PROVIDER} voice id + API key ("provider": "elevenlabs" for ElevenLabs), set "narration": true, run tts.mjs again — the scenes follow the new timings.`);
 // whether the user's key and voice are available is decided here, by this search — never by looking at one .env file
-if (apiKey && cfg.voice) console.log(`🔑 Fish Audio key and voice: available — key from ${FOUND.FISH_API_KEY}, voice from ${FOUND.FISH_VOICE}${silent ? '. "narration": false is for a user WITHOUT them: this video can be voiced — set "narration": true (the recording still waits for the user)' : ''}`);
-else console.log(`🔑 Fish Audio ${[!apiKey && 'key', !cfg.voice && 'voice'].filter(Boolean).join(' and ')}: not found (looked in the environment, ${dir}/.env and every parent folder's .env, ${SKILL_ENV}) — a video without narration unless the user gives them`);
+if (apiKey && cfg.voice) console.log(`🔑 ${PROVIDER} key and voice: available — key from ${FOUND.KEY}, voice from ${FOUND.VOICE}${silent ? '. "narration": false is for a user WITHOUT them: this video can be voiced — set "narration": true (the recording still waits for the user)' : ''}`);
+else console.log(`🔑 ${PROVIDER} ${[!apiKey && 'key', !cfg.voice && 'voice'].filter(Boolean).join(' and ')}: not found (looked in the environment, ${dir}/.env and every parent folder's .env, ${SKILL_ENV}) — a video without narration unless the user gives them`);
 if (unapproved) console.log(`⏸ ${unapproved} cue(s) not recorded yet: silent placeholders with estimated timing (placeholder: true in js/cues.js). Finish the whole video on them; the user reviews it and decides whether to record — only then: node tts.mjs <dir> --approved (the scenes follow the new timings; then read every new take with wave.mjs --unreviewed and set its cut, set the phrase times for when(), sync.mjs).`);
-else if (placeholders) console.log('⚠ placeholder narration is silent with estimated timing — re-run without --placeholder once the user has given their Fish Audio voice id and API key.');
+else if (placeholders) console.log(`⚠ placeholder narration is silent with estimated timing — re-run without --placeholder once the user has given their ${PROVIDER} voice id and API key.`);

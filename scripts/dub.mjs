@@ -49,7 +49,7 @@ if (opt.init) {
   const missing = src.cues.filter((c) => !tr[c.id]).map((c) => c.id);
   if (missing.length) { console.error(`✖ ${lang}: no translation for ${missing.join(', ')}`); process.exit(2); }
   if (fs.existsSync(path.join(DUB, 'script.json')) && !opt.force) { console.error(`✖ ${path.relative(process.cwd(), DUB)}/script.json exists (--force to overwrite)`); process.exit(2); }
-  const keep = ['voice', 'model', 'temperature', 'top_p', 'leadIn', 'gap', 'tail'];   // same voice and model (drama-3)
+  const keep = ['provider', 'elevenlabs', 'voice', 'model', 'temperature', 'top_p', 'leadIn', 'gap', 'tail'];   // same voice and model (drama-3)
   const out = { title: `${src.title || ''} (${lang} dub)`, lang, narration: true };
   for (const k of keep) if (src[k] != null) out[k] = src[k];
   out.cues = src.cues.map((c) => ({ id: c.id, text: tr[c.id], say: tr[c.id] }));

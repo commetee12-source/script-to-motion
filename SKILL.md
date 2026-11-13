@@ -762,7 +762,15 @@ five questions, its neighbours, the seam pass, the internal-name list and the co
 
 Narration is made with **Fish Audio**, model **`drama-3`** (the user's choice; directed in plain language — read
 references/fish-audio.md and https://docs.fish.audio/features/text-to-speech, …/text-to-speech/drama-3), in the
-**user's own voice**. Never pick, guess or borrow another voice, and never use another TTS.
+**user's own voice**. Never pick, guess or borrow another voice, and never use another TTS — except **ElevenLabs**, the
+user's second provider:
+- **ElevenLabs** (`"provider": "elevenlabs"` in `script.json`): key `ELEVENLABS_API_KEY` and voice `ELEVENLABS_VOICE`
+  in the skill's `.env` (or the voice id in `"voice"`); model `eleven_multilingual_v2` unless `"model"` names an
+  `eleven_*` model (`eleven_v3` reads `[tags]` as its own audio tags); voice settings in `"elevenlabs": { stability,
+  similarity_boost, style }`, speed always 1. Fish-style `[break]` / `[long-break]` become SSML breaks for the v2 models;
+  other Fish tags are dropped. Everything else (approval, cache, `cut`, `at`, `wave.mjs`) is the same. The user's voice
+  is still only theirs: never pick a library voice for them.
+
 
 - **Keys.** The user's `FISH_API_KEY` and `FISH_VOICE` are kept in the skill's own `.env` (git-ignored — never in a
   tracked file, a project, output or memory); `tts.mjs` reads them from there (after the environment and any `.env` in
